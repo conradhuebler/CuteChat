@@ -3,7 +3,8 @@
 An LLM agent core and a chat dock for Qt6 applications, in the spirit of CuteChart: a small,
 shareable library that two applications (SupraFit, qurcuma) use instead of each keeping its own copy.
 
-* **`cutechat_core`** (Qt Core + Network): tool contract (`ToolSpec`, `ToolResult`, effects, autonomy),
+* **`cutechat_tools`** (Qt Core only): tool contract (`ToolSpec`, `ToolResult`, effects, autonomy), `ToolRegistry`, `ToolDispatcher`.
+* **`cutechat_core`** (+ Network; includes `cutechat_tools`): tool contract (`ToolSpec`, `ToolResult`, effects, autonomy),
   `ToolRegistry` (schema check, catalogue), `ToolDispatcher` (thread marshalling, audit), `LlmClient`
   (OpenAI-compatible chat completions, SSE streaming, tool calls, model listing, Ollama capabilities),
   `LlmConfig` + `LlmPresets` (profiles in `llm.json`, never a key), `LlmSession` (agent loop with
@@ -44,6 +45,7 @@ dock->setContext(currentDocumentId());   // when the thing a chat is bound to ch
 add_subdirectory(external/CuteChat)           # or: find_package(CuteChat)
 target_link_libraries(myapp PRIVATE CuteChat::cutechat)       # dock + dialog
 target_link_libraries(mycli PRIVATE CuteChat::core)           # headless: no Widgets
+target_link_libraries(myscript PRIVATE CuteChat::tools)       # tool layer only, Qt Core
 ```
 
 Options: `CUTECHAT_BUILD_WIDGETS` (ON), `CUTECHAT_BUILD_TESTS` (ON when top-level), `CUTECHAT_INSTALL`.

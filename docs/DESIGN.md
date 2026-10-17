@@ -10,7 +10,8 @@ named tools" that is *not* specific to one application:
 
 | Layer (target)            | Content | Qt modules |
 |---------------------------|---------|------------|
-| `cutechat_core`           | tool contract, registry, dispatcher, LLM client, config, presets, session (agent loop), chat log / history / recorder, persistence + host interfaces | Core, Network |
+| `cutechat_tools`          | tool contract, registry, dispatcher (Qt Core only; used by qurcuma's core, script dock and palette without a network) | Core |
+| `cutechat_core`           | LLM client, config, presets, session (agent loop), chat log / history / recorder, persistence interface | + Network |
 | `cutechat` (optional)     | `ChatDock` (bubbles, Markdown, streaming, reasoning, history, export), `EndpointDialog` | + Widgets |
 
 Applications plug in through two small interfaces (`ChatHost`, `ChatBackend`); the library
@@ -102,7 +103,7 @@ public:
 * The chat JSON keeps its keys (`project_uuids`, block key `agent_chats`) so stored SupraFit
   projects keep loading; the C++ API says *context* (`addContextId`, `contextIds`,
   `ChatLog::blockKey`).
-* CMake: `cutechat_core`, `cutechat`, alias `CuteChat::core`, `CuteChat::cutechat`; options
+* CMake: `cutechat_tools`, `cutechat_core`, `cutechat`, aliases `CuteChat::tools`, `CuteChat::core`, `CuteChat::cutechat`; options
   `CUTECHAT_BUILD_WIDGETS`, `CUTECHAT_BUILD_TESTS`, `CUTECHAT_INSTALL`.
 
 ## 6. Licence
