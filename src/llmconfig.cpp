@@ -154,7 +154,7 @@ LlmConfig LlmConfig::defaultConfig()
              "endpoint (GET <base_url>/models) and the user picks.",
              "Ollama is addressed as 127.0.0.1, not localhost: localhost may resolve to ::1,",
              "where another server (e.g. an ssh tunnel) can listen.",
-             "More providers: Agent dock menu > Endpoints... (presets for OpenAI, Gemini, ...)." })
+             "More providers: the endpoint manager of the chat dock (presets for OpenAI, Gemini, ...)." })
         note.append(QString::fromLatin1(line));
     config.m_rootExtra.insert(QStringLiteral("_note"), note);
     return config;
