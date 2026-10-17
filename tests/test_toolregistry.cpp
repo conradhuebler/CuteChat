@@ -220,7 +220,7 @@ private slots:
             QJsonObject{ { QStringLiteral("name"), QStringLiteral("x") },
                          { QStringLiteral("mode"), QStringLiteral("c") } });
         QVERIFY(!v.ok);
-        QVERIFY(v.error.contains(QStringLiteral("enum")));
+        QVERIFY(v.error.contains(QStringLiteral("must be one of")));
     }
 
     void validateRejectsOutOfRange()

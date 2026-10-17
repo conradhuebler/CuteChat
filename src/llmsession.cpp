@@ -271,7 +271,7 @@ void LlmSession::declineRemainingCalls(const QJsonArray& toolCalls, const QStrin
         toolMessage.insert(QStringLiteral("role"), QStringLiteral("tool"));
         toolMessage.insert(QStringLiteral("tool_call_id"), call.value(QStringLiteral("id")).toString());
         toolMessage.insert(QStringLiteral("name"), name);
-        toolMessage.insert(QStringLiteral("content"), reason);
+        toolMessage.insert(QStringLiteral("content"), tr("refused: %1").arg(reason));
         m_messages.append(toolMessage);
         emit toolRefused(name, reason);
     }
@@ -330,7 +330,7 @@ void LlmSession::runToolCalls(const QJsonArray& toolCalls)
                 toolMessage.insert(QStringLiteral("role"), QStringLiteral("tool"));
                 toolMessage.insert(QStringLiteral("tool_call_id"), callId);
                 toolMessage.insert(QStringLiteral("name"), name);
-                toolMessage.insert(QStringLiteral("content"), argsError);
+                toolMessage.insert(QStringLiteral("content"), tr("error: %1").arg(argsError));
                 return toolMessage;
             }());
             emit toolRefused(name, argsError);
@@ -351,13 +351,16 @@ void LlmSession::runToolCalls(const QJsonArray& toolCalls)
 
         ToolSpec spec;
         QString refusal;
+        bool declined = false; // refused by the operator/policy (as opposed to an unknown tool)
         if (!m_registry || !m_registry->tool(name, spec)) {
-            refusal = tr("unknown tool '%1'").arg(name);
+            refusal = tr("unknown tool: there is no tool called \"%1\"").arg(name);
         } else if (needsApprovalAt(spec.effect, m_autonomy) && m_approve && !m_approve(spec, args)) {
-            refusal = tr("the operator did not approve this call");
+            refusal = tr("the operator declined this call");
+            declined = true;
         } else if (needsApprovalAt(spec.effect, m_autonomy) && !m_approve) {
             // No approval callback: the safe default refuses anything beyond Read/Display.
-            refusal = tr("this tool needs approval and no approval policy is set");
+            refusal = tr("%1 tools need approval and no approval policy is set").arg(toolEffectName(spec.effect));
+            declined = true;
         }
 
         ToolResult result;
@@ -404,17 +407,25 @@ void LlmSession::runToolCalls(const QJsonArray& toolCalls)
             emit toolFinished(name, result);
         }
 
-        // The tool result goes back as its own message; cap it so one fat result
-        // is not paid for again on every following round.
-        QString content = result.ok
-            ? QJsonDocument(result.data).toJson(QJsonDocument::Compact)
-            : result.error;
-        if (!result.text.isEmpty())
-            content = result.text + QStringLiteral("\n") + content;
+        // The tool result goes back as its own message. A refusal and a failure are told apart by
+        // their first word, so the model can tell "not allowed" from "did not work".
+        QString content;
+        if (!result.ok) {
+            content = (declined ? tr("refused: %1") : tr("error: %1")).arg(result.error);
+        } else {
+            content = result.data.isEmpty() ? result.text
+                                            : QString::fromUtf8(QJsonDocument(result.data).toJson(QJsonDocument::Compact));
+            if (!result.text.isEmpty() && !result.data.isEmpty())
+                content = result.text + QLatin1Char('\n') + content;
+        }
+        // The history is resent in full every round, so one oversized result is paid for again on
+        // every subsequent call.
         if (content.size() > m_maxToolResultChars) {
             content = content.left(m_maxToolResultChars)
-                + QStringLiteral("\n... [truncated, %1 of %2 characters]")
+                + tr("\n... cut after %1 characters (%2 in all); narrow the query or ask for the next page")
                       .arg(m_maxToolResultChars).arg(content.size());
+        } else if (result.truncated) {
+            content += tr("\n(the tool had more to give; ask for the next page)");
         }
 
         // A rendered image is not part of the tool result in this protocol: tool messages are text.

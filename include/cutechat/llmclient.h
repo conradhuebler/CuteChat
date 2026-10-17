@@ -52,6 +52,10 @@ public:
 
     QString model() const { return m_model.isEmpty() ? m_profile.model : m_model; }
 
+    /// List the models sorted case-insensitively, so a model box does not reshuffle between runs.
+    /// Default off: the endpoint's own order. Claude Generated 2026 (from qurcuma).
+    void setSortModels(bool sorted) { m_sortModels = sorted; }
+
     /// Ask the endpoint which models it serves (GET /v1/models). One request.
     /// modelsListed() follows in any case; on a failure modelListFailed() before it.
     void listModels();
@@ -61,7 +65,9 @@ public:
     /// because they offer no such information. Claude Generated (WP10).
     void queryCapabilities(const QStringList& models);
 
-    /// Ask about one model (same answer path as queryCapabilities: modelInfo()). Claude Generated.
+    /// Ask about one model: context length and capabilities, answered through modelInfo(). Unlike
+    /// queryCapabilities() this asks any endpoint (Ollama's /api/show); one that does not know it
+    /// answers with detailsKnown = false. One request, on demand. Claude Generated 2026 (from qurcuma).
     void describeModel(const QString& id);
 
     /// How hard the model should think, in the spelling of the profile's reasoning field
@@ -120,6 +126,7 @@ private:
     QString m_model;   ///< session override; empty = use the profile's
     QString m_apiKey;
     QString m_reasoningEffort = QStringLiteral("medium");
+    bool m_sortModels = false;
 
     // Streaming state, reset per request.
     bool m_streaming = false;

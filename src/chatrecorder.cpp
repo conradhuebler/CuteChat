@@ -89,7 +89,7 @@ void ChatRecorder::complete(ChatEntry* entry)
         ToolSpec spec;
         if (m_registry && m_registry->tool(entry->toolName, spec) && !needsApprovalAt(spec.effect, m_autonomy)) {
             entry->approval = QStringLiteral("not_required");
-            entry->decidedBy = QStringLiteral("autonomy:") + toolAutonomyName(m_autonomy);
+            entry->decidedBy = QStringLiteral("autonomy:") + toolAutonomyId(m_autonomy);
         }
     }
     m_log->touch();

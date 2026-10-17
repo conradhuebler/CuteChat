@@ -135,7 +135,7 @@ ToolResult ToolDispatcher::dispatch(const QString& name, const QJsonObject& args
             // Timed out, or acquired without done visible (should not happen given
             // the release order, but treat as timeout rather than crash).
             result = ToolResult::failure(
-                QStringLiteral("tool '%1' timed out after %2 ms on the GUI thread").arg(name).arg(m_timeoutMs));
+                QStringLiteral("tool '%1' timed out: it did not finish on the GUI thread within %2 ms").arg(name).arg(m_timeoutMs));
         }
     }
 

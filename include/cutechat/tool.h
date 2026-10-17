@@ -42,8 +42,11 @@ enum class ToolAutonomy {
 /// rule lives, so the session's policy and its label cannot say different things.
 bool needsApprovalAt(ToolEffect effect, ToolAutonomy autonomy);
 
-/// Name of @p autonomy for a label and for the log.
+/// Name of @p autonomy for a label and for the log ("ask", "auto in the program", "full auto").
 QString toolAutonomyName(ToolAutonomy autonomy);
+/// Stable identifier of @p autonomy for stored records ("ask", "in-program", "full"): what the
+/// chat files of SupraFit always contained. Claude Generated.
+QString toolAutonomyId(ToolAutonomy autonomy);
 
 /// Which thread a handler must run on. Compute-heavy work may run off the GUI
 /// thread; anything reaching a widget or the application's GUI-owned state is Gui,

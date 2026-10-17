@@ -216,6 +216,14 @@ bool LlmConfig::save(const QString& path, QString* error) const
 bool LlmConfig::updateBaseUrl(const QString& path, const QString& profileName, const QString& baseUrl,
     QString* error)
 {
+    // A base URL needs a scheme: "localhost:11434" would be written and then fail on every request.
+    const QUrl url(baseUrl.trimmed());
+    if (!url.isValid() || (url.scheme() != QLatin1String("http") && url.scheme() != QLatin1String("https"))
+        || url.host().isEmpty()) {
+        if (error)
+            *error = QStringLiteral("\"%1\" is not an http(s) address; write it like http://127.0.0.1:11434/v1").arg(baseUrl.trimmed());
+        return false;
+    }
     LlmConfig config;
     if (!config.load(path, error))
         return false;

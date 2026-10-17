@@ -109,6 +109,107 @@ private slots:
         QCOMPARE(sendOnce().value(QStringLiteral("think")).toBool(false), true);
     }
 
+    // --- describeModel ----------------------------------------------------------
+    void describeModelReportsUnknownDetailsWhenTheEndpointDoesNotKnowShow()
+    {
+        StubServer server;
+        server.reply(404, "{}");
+        LlmClient client;
+        client.setProfile(stubProfile(server));
+        QEventLoop loop;
+        LlmModelInfo info;
+        connect(&client, &LlmClient::modelInfo, &loop, [&](const LlmModelInfo& i) {
+            info = i;
+            loop.quit();
+        });
+        QTimer::singleShot(5000, &loop, &QEventLoop::quit);
+        client.describeModel(QStringLiteral("some-model"));
+        loop.exec();
+        QCOMPARE(info.id, QStringLiteral("some-model"));
+        QVERIFY(!info.detailsKnown);
+        QVERIFY(server.requestHeaders.contains("/api/show"));
+
+        server.reply(200, "{\"capabilities\":[\"completion\",\"tools\",\"vision\"],\"model_info\":{\"llama.context_length\":8192}}");
+        client.describeModel(QStringLiteral("some-model"));
+        loop.exec();
+        QVERIFY(info.detailsKnown);
+        QVERIFY(info.supportsTools && info.supportsVision);
+        QCOMPARE(info.contextLength, 8192);
+    }
+
+    // --- tool results as the model sees them ---------------------------------------
+    void refusalsAndFailuresAreToldApartByTheirFirstWord()
+    {
+        ToolRegistry registry;
+        ToolSpec spec;
+        spec.name = QStringLiteral("rewrite");
+        spec.description = QStringLiteral("changes something");
+        spec.effect = ToolEffect::Mutate;
+        spec.paramSchema = QJsonObject { { QStringLiteral("type"), QStringLiteral("object") } };
+        spec.handler = [](const QJsonObject&) { return ToolResult::failure(QStringLiteral("disk full")); };
+        QVERIFY(registry.add(spec));
+        ToolDispatcher dispatcher(&registry);
+
+        for (int round = 0; round < 3; ++round) {
+            StubServer server;
+            server.enqueue(callResponse(round == 2 ? "no_such_tool" : "rewrite", "c1"));
+            server.enqueue(textResponse("ok"));
+            LlmClient client;
+            client.setProfile(stubProfile(server));
+            LlmSession session(&client, &registry, &dispatcher);
+            session.setApprovalPolicy([round](const ToolSpec&, const QJsonObject&) { return round == 1; });
+            QString answer, error;
+            runTurn(session, QStringLiteral("go"), answer, error);
+            const QJsonArray messages = QJsonDocument::fromJson(server.requests.last()).object().value(QStringLiteral("messages")).toArray();
+            QString toolText;
+            for (const QJsonValue& m : messages)
+                if (m.toObject().value(QStringLiteral("role")).toString() == QLatin1String("tool"))
+                    toolText = m.toObject().value(QStringLiteral("content")).toString();
+            if (round == 0)
+                QVERIFY2(toolText.startsWith(QStringLiteral("refused: ")), qPrintable(toolText));   // declined by the operator
+            if (round == 1)
+                QCOMPARE(toolText, QStringLiteral("error: disk full"));                              // allowed, but it failed
+            if (round == 2)
+                QVERIFY2(toolText.startsWith(QStringLiteral("error: unknown tool")), qPrintable(toolText));
+        }
+    }
+
+    void catalogueIsSortedByName()
+    {
+        ToolRegistry registry;
+        for (const char* name : { "zeta", "alpha", "mid" }) {
+            ToolSpec spec;
+            spec.name = QString::fromLatin1(name);
+            spec.paramSchema = QJsonObject { { QStringLiteral("type"), QStringLiteral("object") } };
+            spec.handler = [](const QJsonObject&) { return ToolResult::success(QJsonObject()); };
+            QVERIFY(registry.add(spec));
+        }
+        QStringList order;
+        for (const ToolSpec& spec : registry.all())
+            order << spec.name;
+        QCOMPARE(order, (QStringList { QStringLiteral("alpha"), QStringLiteral("mid"), QStringLiteral("zeta") }));
+    }
+
+    void autonomyHasALabelAndAStableId()
+    {
+        QCOMPARE(toolAutonomyName(ToolAutonomy::InProgram), QStringLiteral("auto in the program"));
+        QCOMPARE(toolAutonomyId(ToolAutonomy::InProgram), QStringLiteral("in-program")); // what stored chats contain
+        QCOMPARE(toolEffectName(ToolEffect::FileWrite), QStringLiteral("file_write"));
+    }
+
+    void updateBaseUrlRefusesAnAddressWithoutScheme()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath(QStringLiteral("llm.json"));
+        QVERIFY(LlmConfig::writeExampleIfMissing(path));
+        QString error;
+        LlmConfig config;
+        QVERIFY(config.load(path, &error));
+        const QString name = config.activeProfileName();
+        QVERIFY(!LlmConfig::updateBaseUrl(path, name, QStringLiteral("localhost:11434"), &error));
+        QVERIFY(error.contains(QStringLiteral("http")));
+    }
+
     // --- vision ---------------------------------------------------------------
     void imageIsSentOnlyToVisionModels_data()
     {

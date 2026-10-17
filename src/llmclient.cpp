@@ -160,6 +160,8 @@ void LlmClient::handleModelList()
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     if (reply->error() == QNetworkReply::NoError) {
         models = parseModelList(reply->readAll());
+        if (m_sortModels)
+            models.sort(Qt::CaseInsensitive);
     } else {
         emit modelListFailed(describeFailure(status, reply->errorString(), m_profile));
     }
@@ -208,8 +210,29 @@ void LlmClient::setReasoningEffort(const QString& effort)
 
 void LlmClient::describeModel(const QString& id)
 {
-    if (!id.isEmpty())
-        queryCapabilities(QStringList { id });
+    if (id.isEmpty() || !m_profile.isValid())
+        return;
+    // Ollama's native endpoint. Anything else answers 404 or HTML, which is not an error worth
+    // reporting: the reply then carries detailsKnown = false rather than a guess.
+    QString root = m_profile.baseUrl;
+    while (root.endsWith(QLatin1Char('/')))
+        root.chop(1);
+    if (root.endsWith(QLatin1String("/v1")))
+        root.chop(3);
+    QNetworkRequest request{ QUrl(root + QStringLiteral("/api/show")) };
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    request.setTransferTimeout(15000);
+    QNetworkReply* reply = m_network->post(request, QJsonDocument(QJsonObject{ { QStringLiteral("model"), id } }).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, id]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            LlmModelInfo unknown;
+            unknown.id = id;
+            emit modelInfo(unknown);
+            return;
+        }
+        emit modelInfo(parseOllamaShow(id, QJsonDocument::fromJson(reply->readAll()).object()));
+    });
 }
 
 void LlmClient::queryCapabilities(const QStringList& models)

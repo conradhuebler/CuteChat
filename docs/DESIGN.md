@@ -42,6 +42,25 @@ Things qurcuma has and SupraFit lacks that are generic (all ported): vision mess
 free "waiting" rounds, `reasoning effort`, per-model `describeModel`, `updateBaseUrl`,
 call-origin set by the session, reasoning blocks and effort/rounds controls in the dock.
 
+### Where the two code bases disagreed, and which side the library took
+
+| Point | qurcuma | SupraFit | Library |
+|---|---|---|---|
+| `ToolRegistry::all()` order | sorted by name (stable catalogue) | hash order | sorted |
+| Schema keyword `items` (scalar array items) | refused at registration | validated | validated (SupraFit) |
+| `invoke()` of a tool whose `available()` is false | runs | refused ("not available") | refused (SupraFit) |
+| Validation wording | `expects string, got number`, `must be one of: ...`, `must be >= n` | `must be of type`, `below the minimum` | qurcuma's wording, plus the words minimum/maximum |
+| Failed registration | `qWarning` + error | error only | both |
+| `toolEffectName` / `toolAutonomyName` | `file_write`; `auto in the program`, `full auto` | `file-write`; `in-program`, `full` | qurcuma's for labels and logs; new `toolAutonomyId()` = SupraFit's spellings for stored records |
+| Message to the model on a refusal / failure | `refused: ...` / `error: ...` | bare reason | qurcuma's prefixes |
+| Tool payload | text, JSON only when data present | text + JSON always | qurcuma's |
+| Timeout message | `did not finish ... within n ms` | `timed out after n ms` | contains both phrases |
+| Model list | sorted | endpoint order | endpoint order; `setSortModels(true)` for qurcuma |
+| Reasoning effort | none by default (`""`) | always `medium` | default `medium`, application may set `""` |
+| `describeModel` | any endpoint, `detailsKnown=false` on failure | Ollama only (`queryCapabilities`) | both |
+| `updateBaseUrl` | refuses an address without http(s) | no such function | refuses |
+| Session cancel, deferred tool run, audited refusals | missing | present | SupraFit's |
+
 ## 3. What stays in the applications
 
 * All tools (`tools_*.cpp`), job classes, the system prompt text, and the approval *policy* if it

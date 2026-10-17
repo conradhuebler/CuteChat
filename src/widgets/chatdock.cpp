@@ -890,7 +890,7 @@ bool ChatDock::prepareClient()
     m_log.setProfile(profile.name);
     m_log.setModel(m_client->model());
     m_log.setEndpointHost(QUrl(profile.baseUrl).host());
-    m_log.setAutonomy(toolAutonomyName(ToolAutonomy(m_autonomy->currentData().toInt())));
+    m_log.setAutonomy(toolAutonomyId(ToolAutonomy(m_autonomy->currentData().toInt())));
     m_recorder->setAutonomy(ToolAutonomy(m_autonomy->currentData().toInt()));
     return true;
 }

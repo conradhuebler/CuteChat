@@ -9,9 +9,22 @@
 
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QScopeGuard>
 #include <QSet>
 
 namespace {
+
+/// JSON type of @p value in words, for "expects string, got number".
+QString describe(const QJsonValue& value)
+{
+    if (value.isString())  return QStringLiteral("string");
+    if (value.isBool())    return QStringLiteral("boolean");
+    if (value.isDouble())  return QStringLiteral("number");
+    if (value.isArray())   return QStringLiteral("array");
+    if (value.isObject())  return QStringLiteral("object");
+    if (value.isNull())    return QStringLiteral("null");
+    return QStringLiteral("undefined");
+}
 
 bool isValidTypeName(const QString& type)
 {
@@ -34,6 +47,13 @@ ToolRegistry& ToolRegistry::instance()
 bool ToolRegistry::add(const ToolSpec& spec, QString* error)
 {
     QString localError;
+    // Warn as well as report: registration sites count how many tools were added and mostly pass no
+    // error pointer, so a schema the validator refuses made a tool disappear without a word. The
+    // warning reaches the application's log, so a missing tool is visible.
+    const auto warn = qScopeGuard([&localError] {
+        if (!localError.isEmpty())
+            qWarning().noquote() << "tool not registered:" << localError;
+    });
     if (spec.name.isEmpty()) {
         localError = QStringLiteral("tool name is empty");
     } else if (!spec.handler) {
@@ -100,7 +120,15 @@ int ToolRegistry::catalogueBytes() const
 QVector<ToolSpec> ToolRegistry::all() const
 {
     QMutexLocker lock(&m_mutex);
-    return m_tools.values().toVector();
+    // sorted by name: the catalogue goes out with every request, and a stable order keeps it
+    // reproducible (tests, logs, a server-side prompt cache)
+    QVector<ToolSpec> result;
+    result.reserve(m_tools.size());
+    QStringList sorted = m_tools.keys();
+    sorted.sort();
+    for (const QString& name : std::as_const(sorted))
+        result.append(m_tools.value(name));
+    return result;
 }
 
 int ToolRegistry::size() const
@@ -239,7 +267,7 @@ ToolValidation ToolRegistry::validateAgainst(const QJsonObject& schema, const QJ
         else if (type == QStringLiteral("array"))   typeOk = value.isArray();
         else if (type == QStringLiteral("object"))  typeOk = value.isObject();
         if (!typeOk)
-            return { false, QStringLiteral("parameter '%1' must be of type %2").arg(name, type) };
+            return { false, QStringLiteral("parameter '%1' expects %2, got %3").arg(name, type, describe(value)) };
 
         if (type == QStringLiteral("array") && prop.contains(QStringLiteral("items"))) {
             const QString itemType = prop.value(QStringLiteral("items")).toObject().value(QStringLiteral("type")).toString();
@@ -260,14 +288,19 @@ ToolValidation ToolRegistry::validateAgainst(const QJsonObject& schema, const QJ
                 if (a == value) { found = true; break; }
             }
             if (!found)
-                return { false, QStringLiteral("parameter '%1' must be one of the enum values").arg(name) };
+            {
+                QStringList shown;
+                for (const QJsonValue& option : allowed)
+                    shown << option.toVariant().toString();
+                return { false, QStringLiteral("parameter '%1' must be one of: %2").arg(name, shown.join(QStringLiteral(", "))) };
+            }
         }
         if ((type == QStringLiteral("number") || type == QStringLiteral("integer")) && value.isDouble()) {
             const double number = value.toDouble();
             if (prop.contains(QStringLiteral("minimum")) && number < prop.value(QStringLiteral("minimum")).toDouble())
-                return { false, QStringLiteral("parameter '%1' is below the minimum").arg(name) };
+                return { false, QStringLiteral("parameter '%1' is below the minimum: must be >= %2").arg(name).arg(prop.value(QStringLiteral("minimum")).toDouble()) };
             if (prop.contains(QStringLiteral("maximum")) && number > prop.value(QStringLiteral("maximum")).toDouble())
-                return { false, QStringLiteral("parameter '%1' is above the maximum").arg(name) };
+                return { false, QStringLiteral("parameter '%1' is above the maximum: must be <= %2").arg(name).arg(prop.value(QStringLiteral("maximum")).toDouble()) };
         }
     }
     return { true, QString() };

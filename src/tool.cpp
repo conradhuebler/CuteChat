@@ -22,10 +22,20 @@ QString toolAutonomyName(ToolAutonomy autonomy)
 {
     switch (autonomy) {
     case ToolAutonomy::Ask:       return QStringLiteral("ask");
+    case ToolAutonomy::InProgram: return QStringLiteral("auto in the program");
+    case ToolAutonomy::Full:      return QStringLiteral("full auto");
+    }
+    return QStringLiteral("ask");
+}
+
+QString toolAutonomyId(ToolAutonomy autonomy)
+{
+    switch (autonomy) {
+    case ToolAutonomy::Ask:       return QStringLiteral("ask");
     case ToolAutonomy::InProgram: return QStringLiteral("in-program");
     case ToolAutonomy::Full:      return QStringLiteral("full");
     }
-    return QStringLiteral("unknown");
+    return QStringLiteral("ask");
 }
 
 QString toolEffectName(ToolEffect effect)
@@ -35,17 +45,13 @@ QString toolEffectName(ToolEffect effect)
     case ToolEffect::Display:   return QStringLiteral("display");
     case ToolEffect::Mutate:    return QStringLiteral("mutate");
     case ToolEffect::Compute:   return QStringLiteral("compute");
-    case ToolEffect::FileWrite: return QStringLiteral("file-write");
+    case ToolEffect::FileWrite: return QStringLiteral("file_write");
     case ToolEffect::Process:   return QStringLiteral("process");
     }
-    return QStringLiteral("unknown");
+    return QStringLiteral("read");
 }
 
 QString toolAffinityName(ToolAffinity affinity)
 {
-    switch (affinity) {
-    case ToolAffinity::Any: return QStringLiteral("any");
-    case ToolAffinity::Gui: return QStringLiteral("gui");
-    }
-    return QStringLiteral("unknown");
+    return affinity == ToolAffinity::Gui ? QStringLiteral("gui") : QStringLiteral("any");
 }
