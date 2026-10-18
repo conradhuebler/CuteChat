@@ -16,9 +16,20 @@ qurcuma. Design and migration notes: [docs/DESIGN.md](docs/DESIGN.md).
 - Mark new functions "Claude Generated"; copyright `Copyright (C) 2016 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>`.
 - AI never marks anything TESTED/APPROVED; that is the operator's.
 
+## Program help
+An application ships a how-to document (Markdown, sections `## N. Title`) and returns it from `ChatHost::helpText()`. `ChatHelp` (`chathelp.h`, Qt Core only)
+gives the model two ways to it: the tool `get_help` (sections on demand) and `ChatHelp::Mode::Prompt` (whole text appended to the system prompt, the
+dock's menu entry "Program help in the prompt", default `helpInPromptByDefault()`). Headless runners use `ChatHelp` directly. The library never
+interprets the text; keeping it complete is the application's rule (SupraFit: `docs/ASSISTANT_HELP.md`, checked by its `AgentHelpTest`).
+
+## Threading
+`ChatEngine` owns client + session, on a worker thread when the host asks (`ChatHost::agentOnWorkerThread`); the dock only talks to it.
+Signals arrive on the GUI thread, setters are posted, the approval policy runs on the GUI thread. Never block the GUI thread on the
+worker (`BlockingQueuedConnection`): the worker may be waiting for the GUI thread (Gui-affinity tool, approval) — `conversation()` waits in an event loop for that reason.
+
 ## Tests (QtTest, no network, no model)
 `ToolRegistryTest`, `ToolDispatcherTest`, `LlmClientTest`, `LlmSessionTest`, `ChatLogTest`, `LlmConfigPresetTest`,
-`CuteChatExtrasTest` (reasoning effort, vision, free rounds, log sink, updateBaseUrl, backend), `ChatDockTest` (offscreen,
+`ChatEngineTest` (both threading modes), `ChatHelpTest`, `CuteChatExtrasTest` (reasoning effort, vision, free rounds, log sink, updateBaseUrl, backend), `ChatDockTest` (offscreen,
 stub endpoint + test host). Stub endpoint: `tests/test_stubserver.h`. Never send chat requests to a real model in a test.
 
 ## Open items

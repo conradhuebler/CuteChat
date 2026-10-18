@@ -22,20 +22,25 @@
 #include <QRect>
 #include <QString>
 
+#include <cutechat/chathelp.h>
 #include <cutechat/chatlog.h>
 #include <cutechat/llmconfig.h>
+#include <cutechat/tool.h> // ToolAutonomy
 
 class QComboBox;
+class QSpinBox;
 class QLabel;
 class QMenu;
 class QPushButton;
 class QTimer;
 class QToolButton;
 
+class ChatEngine;
 class ChatHost;
 class ChatInput;
 class ChatRecorder;
 class ChatView;
+class ReasoningBlock;
 class LlmClient;
 class LlmSession;
 class ToolDispatcher;
@@ -55,6 +60,15 @@ public:
     void askQuestion(const QString& text);
     /// Select the autonomy level by index (0 ask, 1 run in program, 2 full).
     void setAutonomyIndex(int index);
+    /// The level in the selector, and select one without emitting autonomyChanged().
+    ToolAutonomy autonomy() const;
+    void setAutonomy(ToolAutonomy autonomy);
+    /// The thinking effort chosen in the selector (empty: the endpoint's default, or no selector).
+    QString reasoningEffort() const;
+    /// Whether the whole help text goes into the system prompt (menu entry "Program help in the prompt").
+    ChatHelp::Mode helpMode() const;
+    /// The system prompt of the next question: the host's, extended by the help as chosen.
+    QString systemPrompt() const;
     /// The "more" menu (new chat, history, export, import, ...).
     QMenu* actionsMenu() const { return m_menu; }
     QMenu* historyMenu() const { return m_historyMenu; }
@@ -64,8 +78,18 @@ public:
     /// The pieces the dock owns, for applications that connect to them (log, macro recorder, ...).
     ToolRegistry* registry() const { return m_registry; }
     ToolDispatcher* dispatcher() const { return m_dispatcher; }
-    LlmClient* client() const { return m_client; }
-    LlmSession* session() const { return m_session; }
+    ChatEngine* engine() const { return m_engine; }
+    /// The engine's client and session. Call them only when the host did not ask for a worker
+    /// thread (ChatHost::agentOnWorkerThread); otherwise connect to them or use engine().
+    LlmClient* client() const;
+    LlmSession* session() const;
+
+signals:
+    /// The user picked another autonomy level (also by setAutonomyIndex). With
+    /// ChatHost::rememberAutonomy() the level is stored under settingsPrefix() first.
+    void autonomyChanged(ToolAutonomy autonomy);
+    /// The user picked another thinking effort (ChatHost::showAgentControls only).
+    void reasoningEffortChanged(const QString& effort);
 
 public slots:
     void toggleMaximized();
@@ -88,9 +112,13 @@ private slots:
 
 private:
     bool prepareClient();
+    void loadAgentControls(const LlmProfile& profile);
+    void rememberAgentControls();
     void setRunning(bool running);
     void addNotice(const QString& text, bool error = false, bool store = true);
     void flushStream();
+    void foldReasoning();
+    void updateAutonomyNote();
     void finishTurn();
     void autosave();
     void showLog(const ChatLog& log);
@@ -107,10 +135,13 @@ private:
     void rememberDirectory(const QString& file);
 
     QComboBox *m_profile, *m_model, *m_autonomy;
+    QComboBox* m_thinking = nullptr; ///< only with ChatHost::showAgentControls
+    QSpinBox* m_rounds = nullptr;
     QPushButton *m_send, *m_stop, *m_refresh;
     QToolButton *m_menuButton, *m_maxButton;
     QMenu *m_menu, *m_historyMenu;
     QLabel *m_status, *m_identity;
+    QLabel* m_autonomyNote = nullptr;
     ChatView* m_view;
     ChatInput* m_input;
 
@@ -118,8 +149,9 @@ private:
     bool m_ownsRegistry = true;
     ToolRegistry* m_registry;
     ToolDispatcher* m_dispatcher;
-    LlmClient* m_client;
-    LlmSession* m_session;
+    ChatEngine* m_engine;
+    ChatHelp m_help;
+    QAction* m_helpInPrompt = nullptr;
     ChatRecorder* m_recorder;
 
     ChatLog m_log;
@@ -133,6 +165,7 @@ private:
     // streaming: chunks are collected and shown at most every ~90 ms
     QTimer* m_streamTimer;
     QString m_streamText;
+    ReasoningBlock* m_reasoning = nullptr; ///< the block of the round in progress
     bool m_streamOpen = false;
 
     QString m_contextId; ///< context the current chat belongs to (empty: none)

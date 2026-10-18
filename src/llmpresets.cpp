@@ -43,6 +43,11 @@ const QVector<LlmPreset>& catalog()
             QStringLiteral("Local Ollama server, no key. The address is 127.0.0.1 on purpose: \"localhost\" may "
                            "resolve to ::1 first, where another server (for example an ssh tunnel) can listen. "
                            "Tool support per model is read from Ollama's /api/show."));
+        add("ollama-cloud", "Ollama Cloud", "https://ollama.com/v1", "OLLAMA_API_KEY", "think", false, false,
+            QStringLiteral("Ollama's hosted models, needs an API key (ollama.com account). Same API and tool "
+                           "support as a local Ollama, but the conversation and the data the assistant reads "
+                           "leave the machine. Unverified: base URL and model names (the cloud ones carry a "
+                           "-cloud suffix) were taken from Ollama's documentation, not tried here."));
         add("lmstudio", "LM Studio (local)", "http://127.0.0.1:1234/v1", "", "", true, true,
             QStringLiteral("Local LM Studio server (start it in the Developer tab), no key."));
         add("llamacpp", "llama.cpp server (local)", "http://127.0.0.1:8080/v1", "", "", true, true,

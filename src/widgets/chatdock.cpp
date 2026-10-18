@@ -12,6 +12,7 @@
 #include <cutechat/chatdock.h>
 
 #include <cutechat/chathost.h>
+#include <cutechat/chatengine.h>
 #include <cutechat/chatrecorder.h>
 #include <cutechat/endpointdialog.h>
 #include <cutechat/llmclient.h>
@@ -48,6 +49,7 @@
 #include <QSettings>
 #include <QSet>
 #include <QShortcut>
+#include <QSpinBox>
 #include <QStandardPaths>
 #include <QTextBrowser>
 #include <QTextDocument>
@@ -262,6 +264,63 @@ private:
     QLabel *m_head, *m_details;
 };
 
+/// The model's reasoning of one turn: open while it thinks, folded when the answer starts, and it
+/// stays in the transcript so it can be read afterwards. A view-only element: it is not part of the
+/// stored chat. Claude Generated 2026 (from qurcuma).
+class ReasoningBlock : public QFrame {
+public:
+    explicit ReasoningBlock(QWidget* parent = nullptr)
+        : QFrame(parent)
+    {
+        setFrameShape(QFrame::StyledPanel);
+        m_toggle = new QToolButton;
+        m_toggle->setAutoRaise(true);
+        m_toggle->setCheckable(true);
+        m_toggle->setChecked(true);
+        m_toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        m_toggle->setArrowType(Qt::DownArrow);
+        m_text = new QPlainTextEdit;
+        m_text->setReadOnly(true);
+        m_text->setFrameShape(QFrame::NoFrame);
+        m_text->setForegroundRole(QPalette::PlaceholderText);
+        auto* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(4, 2, 4, 4);
+        layout->setSpacing(0);
+        layout->addWidget(m_toggle, 0, Qt::AlignLeft);
+        layout->addWidget(m_text);
+        connect(m_toggle, &QToolButton::toggled, this, [this](bool open) {
+            m_text->setVisible(open);
+            m_toggle->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
+        });
+        updateTitle();
+    }
+
+    void append(const QString& text)
+    {
+        m_chars += int(text.size());
+        QTextCursor cursor = m_text->textCursor();
+        cursor.movePosition(QTextCursor::End);
+        cursor.insertText(text);
+        m_text->setTextCursor(cursor);
+        const int lines = qBound(2, int(m_text->document()->size().height()), 8);
+        m_text->setFixedHeight(lines * m_text->fontMetrics().lineSpacing()
+            + int(m_text->document()->documentMargin() * 2) + 4);
+        updateTitle();
+    }
+    void fold() { m_toggle->setChecked(false); }
+    QString text() const { return m_text->toPlainText(); }
+
+private:
+    void updateTitle()
+    {
+        m_toggle->setText(m_chars > 0 ? QObject::tr("Thinking (%n character(s))", "", m_chars) : QObject::tr("Thinking..."));
+    }
+
+    QToolButton* m_toggle;
+    QPlainTextEdit* m_text;
+    int m_chars = 0;
+};
+
 /// Transcript: scroll area with one widget per entry; follows the end unless the user scrolled up.
 class ChatView : public QScrollArea {
 public:
@@ -332,6 +391,13 @@ public:
         insert(line);
         m_tools.append(line);
         return line;
+    }
+
+    ReasoningBlock* addReasoning()
+    {
+        auto* block = new ReasoningBlock;
+        insert(block);
+        return block;
     }
 
     void addNotice(const ChatEntry& entry, bool error)
@@ -499,6 +565,7 @@ ChatDock::ChatDock(ChatHost* host, QWidget* parent)
     , m_host(host)
 {
     const ChatUiTexts texts = host->uiTexts();
+    m_help = ChatHelp(host->helpText());
     setObjectName(texts.dockObjectName);
     setMinimumWidth(300);
 
@@ -516,7 +583,31 @@ ChatDock::ChatDock(ChatHost* host, QWidget* parent)
     m_autonomy->addItem(texts.askLabel, int(ToolAutonomy::Ask));
     m_autonomy->addItem(texts.inProgramLabel, int(ToolAutonomy::InProgram));
     m_autonomy->addItem(texts.fullLabel, int(ToolAutonomy::Full));
-    m_autonomy->setToolTip(tr("Which tool calls run without asking"));
+    m_autonomy->setToolTip(texts.autonomyTip);
+
+    // Optional: how hard the model thinks and how many tool rounds one turn may take. A limit that
+    // only announces itself by stopping the work is a limit nobody can plan around, so an
+    // application that works with long tool chains shows them (ChatHost::showAgentControls).
+    if (host->showAgentControls()) {
+        m_thinking = new QComboBox;
+        m_thinking->addItem(tr("Thinking: endpoint default"), QString());
+        m_thinking->addItem(tr("Thinking: off"), QStringLiteral("off"));
+        m_thinking->addItem(tr("Thinking: low"), QStringLiteral("low"));
+        m_thinking->addItem(tr("Thinking: medium"), QStringLiteral("medium"));
+        m_thinking->addItem(tr("Thinking: high"), QStringLiteral("high"));
+        m_thinking->setToolTip(tr("How hard the model should think before it answers. A model whose "
+                                  "endpoint ignores the field is not affected."));
+        m_rounds = new QSpinBox;
+        m_rounds->setRange(1, 500);
+        m_rounds->setPrefix(tr("Rounds: "));
+        m_rounds->setToolTip(tr("How many rounds of tool calls one question may take. Waiting for a "
+                                "simulation does not count."));
+        connect(m_thinking, &QComboBox::activated, this, [this](int) {
+            rememberAgentControls();
+            emit reasoningEffortChanged(m_thinking->currentData().toString());
+        });
+        connect(m_rounds, &QSpinBox::editingFinished, this, [this]() { rememberAgentControls(); });
+    }
 
     m_maxButton = new QToolButton;
     m_maxButton->setText(QStringLiteral("⛶"));
@@ -536,6 +627,18 @@ ChatDock::ChatDock(ChatHost* host, QWidget* parent)
     m_menu->addAction(tr("Import JSON…"), this, &ChatDock::importJson);
     m_menu->addSeparator();
     m_menu->addAction(tr("Copy last answer"), this, &ChatDock::copyLastAnswer);
+    if (!m_help.isEmpty()) {
+        m_helpInPrompt = m_menu->addAction(tr("Program help in the prompt"));
+        m_helpInPrompt->setCheckable(true);
+        m_helpInPrompt->setToolTip(tr("Off: the assistant fetches a section of the program help when a question needs it (tool get_help). "
+                                      "On: the whole help (about %1 tokens) is added to every request - always at hand, but it uses up context.")
+                                       .arg(m_help.estimatedTokens()));
+        m_helpInPrompt->setChecked(QSettings().value(settingsKey(QStringLiteral("help_in_prompt")), host->helpInPromptByDefault()).toBool());
+        connect(m_helpInPrompt, &QAction::toggled, this, [this](bool on) {
+            QSettings().setValue(settingsKey(QStringLiteral("help_in_prompt")), on);
+            m_engine->setSystemPrompt(systemPrompt());
+        });
+    }
     QAction* removeChats = m_menu->addAction(texts.removeChatsAction, this, &ChatDock::removeContextChats);
     removeChats->setToolTip(texts.removeChatsTip);
     m_menu->setToolTipsVisible(true);
@@ -553,6 +656,10 @@ ChatDock::ChatDock(ChatHost* host, QWidget* parent)
     flow->addWidget(m_model);
     flow->addWidget(m_refresh);
     flow->addWidget(m_autonomy);
+    if (m_thinking) {
+        flow->addWidget(m_thinking);
+        flow->addWidget(m_rounds);
+    }
     selectors->setLayout(flow);
     auto* header = new QHBoxLayout;
     header->addWidget(selectors, 1);
@@ -584,7 +691,12 @@ ChatDock::ChatDock(ChatHost* host, QWidget* parent)
     m_identity->setForegroundRole(QPalette::PlaceholderText);
     m_identity->setWordWrap(true);
     m_identity->setToolTip(tr("Endpoint and model the next question goes to"));
+    m_autonomyNote = new QLabel;
+    m_autonomyNote->setWordWrap(true);
+    m_autonomyNote->setStyleSheet(QStringLiteral("color:#d4a017; font-weight:bold;")); // amber: readable on light and dark
+    m_autonomyNote->hide();
     layout->addLayout(header);
+    layout->addWidget(m_autonomyNote);
     layout->addWidget(m_identity);
     layout->addWidget(m_view, 1);
     layout->addLayout(bottom);
@@ -600,17 +712,29 @@ ChatDock::ChatDock(ChatHost* host, QWidget* parent)
         m_registry = new ToolRegistry;
         host->registerTools(*m_registry);
     }
-    m_dispatcher = new ToolDispatcher(m_registry, this);
-    m_client = new LlmClient(this);
-    m_session = new LlmSession(m_client, m_registry, m_dispatcher, this);
-    m_session->setSystemPrompt(host->systemPrompt());
-    m_session->setKeepHistory(true); // a chat: follow-up questions see the earlier turns
+    m_help.registerTool(*m_registry); // the tool get_help; whether the text also goes into the prompt is the menu's choice
+    m_dispatcher = host->sharedDispatcher();
+    if (!m_dispatcher)
+        m_dispatcher = new ToolDispatcher(m_registry, this);
+    // Client and session live in the engine; a host whose tools wait asks for a worker thread
+    // (ChatHost::agentOnWorkerThread) and the dock cannot tell the difference.
+    m_engine = new ChatEngine(m_registry, m_dispatcher, host->agentOnWorkerThread(), this);
+    m_engine->setSystemPrompt(systemPrompt());
+    m_engine->setKeepHistory(true); // a chat: follow-up questions see the earlier turns
     m_streamTimer = new QTimer(this);
     m_streamTimer->setSingleShot(true);
     m_streamTimer->setInterval(90);
     connect(m_streamTimer, &QTimer::timeout, this, &ChatDock::flushStream);
 
-    connect(m_session, &LlmSession::assistantChunk, this, [this](const QString& t) {
+    connect(m_engine, &ChatEngine::reasoningChunk, this, [this](const QString& t) {
+        if (!m_reasoning) {
+            m_reasoning = m_view->addReasoning();
+            m_view->scrollToEnd();
+        }
+        m_reasoning->append(t);
+    });
+    connect(m_engine, &ChatEngine::assistantChunk, this, [this](const QString& t) {
+        foldReasoning();
         if (!m_streamOpen) {
             m_streamOpen = true;
             m_streamText.clear();
@@ -621,7 +745,8 @@ ChatDock::ChatDock(ChatHost* host, QWidget* parent)
         if (!m_streamTimer->isActive())
             m_streamTimer->start();
     });
-    connect(m_session, &LlmSession::assistantMessage, this, [this](const QString& t) {
+    connect(m_engine, &ChatEngine::assistantMessage, this, [this](const QString& t) {
+        foldReasoning();
         m_streamTimer->stop();
         if (m_streamOpen) {
             m_streamText = t.isEmpty() ? m_streamText : t;
@@ -631,9 +756,10 @@ ChatDock::ChatDock(ChatHost* host, QWidget* parent)
             m_view->addMessage(m_log.append(ChatEntry::Kind::Assistant, t));
         }
     });
-    connect(m_session, &LlmSession::toolStarted, this, [this](const QString& name, const QJsonObject& args) {
+    connect(m_engine, &ChatEngine::toolStarted, this, [this](const QString& name, const QJsonObject& args) {
         m_lastToolName = name;
         m_lastToolArgs = args;
+        foldReasoning();
         if (m_streamOpen) { // text before a tool call closes that bubble (before the recorder adds the tool)
             m_streamTimer->stop();
             flushStream();
@@ -642,10 +768,10 @@ ChatDock::ChatDock(ChatHost* host, QWidget* parent)
     });
     // The audit trail (tool, arguments, effect, full result, duration, approval) is written by the
     // same recorder as in suprafit_cli --agent; the view only follows it (WP11).
-    m_recorder = new ChatRecorder(m_session, m_registry, this);
+    m_recorder = new ChatRecorder(m_engine->session(), m_registry, this);
     m_recorder->setLog(&m_log);
     m_recorder->setContextArguments(host->contextArguments());
-    connect(m_session, &LlmSession::toolFinished, this, [this](const QString& name, const ToolResult& result) {
+    connect(m_engine, &ChatEngine::toolFinished, this, [this](const QString& name, const ToolResult& result) {
         m_host->toolFinished(name, name == m_lastToolName ? m_lastToolArgs : QJsonObject(), result);
     });
     m_recorder->onToolAdded = [this](int index) {
@@ -657,31 +783,31 @@ ChatDock::ChatDock(ChatHost* host, QWidget* parent)
             if (ToolLine* line = m_view->lastTool())
                 line->update(*entry, false);
     };
-    m_session->setApprovalPolicy(m_recorder->wrapApproval([this](const ToolSpec& spec, const QJsonObject& args) {
+    m_engine->setApprovalPolicy(m_recorder->wrapApproval([this](const ToolSpec& spec, const QJsonObject& args) {
         return m_host->approveToolCall(spec, args, this);
     }, QStringLiteral("user")));
-    connect(m_session, &LlmSession::failed, this, [this](const QString& e) {
+    connect(m_engine, &ChatEngine::failed, this, [this](const QString& e) {
         addNotice(e, true);
         finishTurn();
     });
-    connect(m_session, &LlmSession::finished, this, &ChatDock::finishTurn);
+    connect(m_engine, &ChatEngine::finished, this, &ChatDock::finishTurn);
 
     // ---- endpoint and model selection (WP10) ----
     // Former bug ("only glm can be selected"): the model list was only filled after pressing
     // "Models", and every profile change reset the field to the profile's default model, so the
     // only entry ever offered was the profile's glm. Now each profile switch lists the models of
     // that endpoint at once and shows the model last chosen for it (LlmModelSelection).
-    connect(m_client, &LlmClient::modelListFailed, this, [this](const QString& error) {
+    connect(m_engine, &ChatEngine::modelListFailed, this, [this](const QString& error) {
         m_listError = error;
     });
-    connect(m_client, &LlmClient::modelsListed, this, [this](const QStringList& models) {
+    connect(m_engine, &ChatEngine::modelsListed, this, [this](const QStringList& models) {
         m_listed = models;
         const QString keep = m_model->currentText().trimmed();
         m_model->blockSignals(true);
         m_model->clear();
         for (const QString& id : models)
             m_model->addItem(id);
-        LlmProfile profile = m_client->profile();
+        LlmProfile profile = m_engine->profile();
         const QString chosen = keep.isEmpty() ? m_selection.choose(profile, models) : keep;
         // select the item itself: an edit text over another current item would be replaced as
         // soon as that item changes (capability icons arrive later)
@@ -697,10 +823,12 @@ ChatDock::ChatDock(ChatHost* host, QWidget* parent)
             m_listStatus = models.isEmpty() ? tr("no model list (type the model)") : tr("%n model(s)", "", models.size());
         m_listError.clear();
         updateIdentity();
-        m_client->queryCapabilities(models);
+        m_engine->queryCapabilities(models);
     });
-    connect(m_client, &LlmClient::modelInfo, this, [this](const LlmModelInfo& info) {
+    connect(m_engine, &ChatEngine::modelInfo, this, [this](const LlmModelInfo& info) {
         m_infos.insert(info.id, info);
+        if (info.id == m_model->currentText().trimmed())
+            m_engine->setVisionCapable(info.supportsVision); // a tool that renders an image is told, not answered with a PNG the model cannot open
         const int index = m_model->findText(info.id);
         if (index >= 0 && info.detailsKnown) {
             m_model->setItemIcon(index, toolIcon(info.supportsTools));
@@ -710,6 +838,12 @@ ChatDock::ChatDock(ChatHost* host, QWidget* parent)
         }
         if (info.id == m_model->currentText().trimmed())
             updateIdentity();
+    });
+    connect(m_autonomy, &QComboBox::currentIndexChanged, this, [this](int) {
+        updateAutonomyNote();
+        if (m_host->rememberAutonomy())
+            QSettings().setValue(settingsKey(QStringLiteral("autonomy")), m_autonomy->currentData().toInt());
+        emit autonomyChanged(autonomy());
     });
     connect(m_refresh, &QPushButton::clicked, this, [this] { listModelsForProfile(); });
     connect(m_profile, &QComboBox::currentTextChanged, this, [this](const QString&) { listModelsForProfile(); });
@@ -730,6 +864,12 @@ ChatDock::ChatDock(ChatHost* host, QWidget* parent)
     });
 
     QSettings settings;
+    if (host->rememberAutonomy()) {
+        const int stored = settings.value(settingsKey(QStringLiteral("autonomy")), int(ToolAutonomy::Ask)).toInt();
+        const int at = m_autonomy->findData(stored);
+        m_autonomy->setCurrentIndex(at < 0 ? 0 : at);
+        updateAutonomyNote();
+    }
     resetLog();
     m_inputHistory.setItems(settings.value(settingsKey(QStringLiteral("input_history"))).toStringList());
     {
@@ -743,10 +883,16 @@ ChatDock::ChatDock(ChatHost* host, QWidget* parent)
     reloadProfiles();
 }
 
+LlmClient* ChatDock::client() const { return m_engine ? m_engine->client() : nullptr; }
+LlmSession* ChatDock::session() const { return m_engine ? m_engine->session() : nullptr; }
+
 ChatDock::~ChatDock()
 {
-    m_session->cancel();
+    m_engine->cancel();
     autosave();
+    // the engine first: its worker may still use the registry
+    delete m_engine;
+    m_engine = nullptr;
     if (m_ownsRegistry)
         delete m_registry; // the dispatcher only borrows it; both go with the dock
 }
@@ -793,6 +939,35 @@ bool ChatDock::currentProfile(LlmProfile& profile) const
     return config.load(LlmConfig::defaultPath()) && config.profile(m_profile->currentText(), profile);
 }
 
+/// The profile's remembered thinking effort and round limit into the controls. Claude Generated 2026.
+void ChatDock::loadAgentControls(const LlmProfile& profile)
+{
+    if (!m_thinking)
+        return;
+    const QString name = QString::fromUtf8(QUrl::toPercentEncoding(profile.name));
+    QSettings settings;
+    const QString effort = settings.value(settingsKey(QStringLiteral("reasoning/%1").arg(name))).toString();
+    const int at = m_thinking->findData(effort);
+    m_thinking->setCurrentIndex(at < 0 ? 0 : at);
+    m_rounds->setValue(settings.value(settingsKey(QStringLiteral("rounds/%1").arg(name)),
+                                      profile.maxToolIterations).toInt());
+    m_engine->setReasoningEffort(m_thinking->currentData().toString());
+    m_engine->setMaxIterations(m_rounds->value());
+}
+
+void ChatDock::rememberAgentControls()
+{
+    LlmProfile profile;
+    if (!m_thinking || !currentProfile(profile))
+        return;
+    const QString name = QString::fromUtf8(QUrl::toPercentEncoding(profile.name));
+    QSettings settings;
+    settings.setValue(settingsKey(QStringLiteral("reasoning/%1").arg(name)), m_thinking->currentData().toString());
+    settings.setValue(settingsKey(QStringLiteral("rounds/%1").arg(name)), m_rounds->value());
+    m_engine->setReasoningEffort(m_thinking->currentData().toString());
+    m_engine->setMaxIterations(m_rounds->value());
+}
+
 void ChatDock::listModelsForProfile()
 {
     LlmProfile profile;
@@ -802,8 +977,9 @@ void ChatDock::listModelsForProfile()
         return;
     }
     m_profile->setProperty("keep", profile.name);
-    m_client->setProfile(profile); // drops a model chosen for another profile
-    m_client->setApiKey(SessionKeys::effectiveKey(profile));
+    loadAgentControls(profile);
+    m_engine->setProfile(profile); // drops a model chosen for another profile
+    m_engine->setApiKey(SessionKeys::effectiveKey(profile));
     m_infos.clear();
     m_listed.clear();
     // the remembered (or default) model at once, so the field never shows the previous profile's
@@ -818,18 +994,18 @@ void ChatDock::listModelsForProfile()
         updateIdentity();
         return;
     }
-    m_client->listModels();
+    m_engine->listModels();
 }
 
 void ChatDock::applyModel(const QString& model, bool remember)
 {
     const QString id = model.trimmed();
-    m_client->setModel(id);
+    m_engine->setModel(id);
     if (remember) {
-        m_selection.remember(m_client->profile().name, id);
+        m_selection.remember(m_engine->profile().name, id);
         QSettings settings;
         settings.beginGroup(settingsKey(QStringLiteral("models")));
-        const QString key = QString::fromUtf8(QUrl::toPercentEncoding(m_client->profile().name));
+        const QString key = QString::fromUtf8(QUrl::toPercentEncoding(m_engine->profile().name));
         if (id.isEmpty())
             settings.remove(key);
         else
@@ -841,7 +1017,7 @@ void ChatDock::applyModel(const QString& model, bool remember)
 
 void ChatDock::updateIdentity()
 {
-    const LlmProfile profile = m_client->profile();
+    const LlmProfile profile = m_engine->profile();
     const QString model = m_model->currentText().trimmed();
     QString text = LlmConfig::displayName(profile) + QStringLiteral(" · ") + (model.isEmpty() ? tr("no model chosen") : model);
     if (!m_listStatus.isEmpty())
@@ -877,18 +1053,20 @@ bool ChatDock::prepareClient()
     }
     if (!LlmConfig::isLocalEndpoint(profile))
         addNotice(m_host->uiTexts().remoteEndpointNotice.arg(profile.baseUrl));
-    m_client->setProfile(profile);
-    m_client->setApiKey(SessionKeys::effectiveKey(profile));
-    m_client->setModel(m_model->currentText().trimmed());
-    if (m_client->model().isEmpty()) {
+    m_engine->setProfile(profile);
+    m_engine->setApiKey(SessionKeys::effectiveKey(profile));
+    m_engine->setModel(m_model->currentText().trimmed());
+    if (m_engine->model().isEmpty()) {
         addNotice(tr("No model chosen: pick one from the list or type its name."), true);
         return false;
     }
-    m_session->setSystemPrompt(m_host->systemPrompt());
-    m_session->setMaxIterations(profile.maxToolIterations);
-    m_session->setAutonomy(ToolAutonomy(m_autonomy->currentData().toInt()));
+    m_engine->setSystemPrompt(systemPrompt());
+    m_engine->setMaxIterations(m_rounds ? m_rounds->value() : profile.maxToolIterations);
+    if (m_thinking)
+        m_engine->setReasoningEffort(m_thinking->currentData().toString());
+    m_engine->setAutonomy(ToolAutonomy(m_autonomy->currentData().toInt()));
     m_log.setProfile(profile.name);
-    m_log.setModel(m_client->model());
+    m_log.setModel(m_engine->model());
     m_log.setEndpointHost(QUrl(profile.baseUrl).host());
     m_log.setAutonomy(toolAutonomyId(ToolAutonomy(m_autonomy->currentData().toInt())));
     m_recorder->setAutonomy(ToolAutonomy(m_autonomy->currentData().toInt()));
@@ -901,6 +1079,38 @@ void ChatDock::askQuestion(const QString& text)
     send();
 }
 
+void ChatDock::updateAutonomyNote()
+{
+    const ChatUiTexts texts = m_host->uiTexts();
+    const QString note = autonomy() == ToolAutonomy::InProgram ? texts.inProgramNote
+        : autonomy() == ToolAutonomy::Full                     ? texts.fullNote
+                                                               : QString();
+    m_autonomyNote->setText(note);
+    m_autonomyNote->setVisible(!note.isEmpty());
+}
+
+ToolAutonomy ChatDock::autonomy() const
+{
+    return ToolAutonomy(m_autonomy->currentData().toInt());
+}
+
+void ChatDock::setAutonomy(ToolAutonomy autonomy)
+{
+    const int at = m_autonomy->findData(int(autonomy));
+    if (at < 0)
+        return;
+    {
+        QSignalBlocker block(m_autonomy);
+        m_autonomy->setCurrentIndex(at);
+    }
+    updateAutonomyNote();
+}
+
+QString ChatDock::reasoningEffort() const
+{
+    return m_thinking ? m_thinking->currentData().toString() : QString();
+}
+
 void ChatDock::setAutonomyIndex(int index)
 {
     if (index >= 0 && index < m_autonomy->count())
@@ -910,7 +1120,7 @@ void ChatDock::setAutonomyIndex(int index)
 void ChatDock::send()
 {
     const QString question = m_input->toPlainText().trimmed();
-    if (question.isEmpty() || m_session->isBusy() || !prepareClient())
+    if (question.isEmpty() || m_stop->isEnabled() || m_engine->isBusy() || !prepareClient())
         return;
     m_inputHistory.push(question);
     QSettings().setValue(settingsKey(QStringLiteral("input_history")), m_inputHistory.items());
@@ -919,17 +1129,30 @@ void ChatDock::send()
     m_view->scrollToEnd();
     m_streamOpen = false;
     setRunning(true);
-    m_session->ask(question);
+    m_engine->ask(question);
 }
 
 void ChatDock::stop()
 {
-    m_session->cancel();
-    finishTurn();
+    m_engine->cancel();
+    // Same thread: cancel() has already ended the turn through finished(). Worker: finished() is on
+    // its way and ends it when it arrives; ending it here as well would let that late signal close
+    // the NEXT turn if the user asks again at once.
+    if (!m_engine->isThreaded())
+        finishTurn();
+}
+
+void ChatDock::foldReasoning()
+{
+    if (!m_reasoning)
+        return;
+    m_reasoning->fold();
+    m_reasoning = nullptr; // the next round of the turn gets a block of its own
 }
 
 void ChatDock::finishTurn()
 {
+    foldReasoning();
     if (m_streamOpen) {
         m_streamTimer->stop();
         flushStream();
@@ -973,7 +1196,7 @@ void ChatDock::autosave()
 {
     if (m_log.isEmpty())
         return;
-    m_log.setConversation(m_session->conversation());
+    m_log.setConversation(m_engine->conversation());
     m_log.touch();
     // the backend copy (SupraFit: inside the project file) is the record; the AppData copy is a
     // convenience for the History
@@ -988,6 +1211,16 @@ void ChatDock::autosave()
 bool ChatDock::storeInBackend() const
 {
     return m_host->chatBackend() && m_host->storeInBackend();
+}
+
+ChatHelp::Mode ChatDock::helpMode() const
+{
+    return m_helpInPrompt && m_helpInPrompt->isChecked() ? ChatHelp::Mode::Prompt : ChatHelp::Mode::Tool;
+}
+
+QString ChatDock::systemPrompt() const
+{
+    return m_help.extendPrompt(m_host->systemPrompt(), helpMode());
 }
 
 QString ChatDock::settingsKey(const QString& name) const
@@ -1005,6 +1238,7 @@ void ChatDock::resetLog()
 
 void ChatDock::showLog(const ChatLog& log)
 {
+    m_reasoning = nullptr; // its widget goes with the view
     m_view->clear();
     for (const ChatEntry& entry : log.entries())
         m_view->add(entry);
@@ -1013,11 +1247,12 @@ void ChatDock::showLog(const ChatLog& log)
 
 void ChatDock::newChat()
 {
-    if (m_session->isBusy())
-        m_session->cancel();
+    if (m_engine->isBusy())
+        m_engine->cancel();
     finishTurn();
     resetLog();
-    m_session->reset();
+    m_engine->reset();
+    m_reasoning = nullptr; // its widget goes with the view
     m_view->clear();
     if (m_contextId.isEmpty())
         addNotice(m_host->uiTexts().noContextNotice, false, false);
@@ -1028,7 +1263,7 @@ void ChatDock::setContext(const QString& contextId)
 {
     if (contextId == m_contextId && !m_log.isEmpty())
         return;
-    if (m_session->isBusy()) // a running answer stays with its context; switching waits for it
+    if (m_engine->isBusy()) // a running answer stays with its context; switching waits for it
         return;
     autosave();
     m_log = ChatLog(); // stored above; must not be stored again into the next context
@@ -1054,14 +1289,14 @@ void ChatDock::setContext(const QString& contextId)
 
 void ChatDock::showChat(const ChatLog& log, bool fromContext)
 {
-    if (m_session->isBusy())
-        m_session->cancel();
+    if (m_engine->isBusy())
+        m_engine->cancel();
     finishTurn();
     m_log = log;
     m_log.addContextId(m_contextId);
     m_recorder->setLog(&m_log);
-    m_session->reset();
-    m_session->setConversation(log.conversation());
+    m_engine->reset();
+    m_engine->setConversation(log.conversation());
     showLog(m_log);
     const ChatUiTexts texts = m_host->uiTexts();
     if (fromContext)
@@ -1096,7 +1331,8 @@ void ChatDock::removeContextChats()
         return;
     backend->clear(m_contextId);
     resetLog();
-    m_session->reset();
+    m_engine->reset();
+    m_reasoning = nullptr; // its widget goes with the view
     m_view->clear();
     addNotice(texts.chatsRemovedNotice, false, false);
 }
@@ -1174,7 +1410,7 @@ void ChatDock::exportJson()
     if (file.isEmpty())
         return;
     rememberDirectory(file);
-    m_log.setConversation(m_session->conversation());
+    m_log.setConversation(m_engine->conversation());
     QString error;
     if (!m_log.save(file, &error))
         addNotice(tr("Export failed: %1").arg(error), true, false);

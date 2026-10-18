@@ -36,10 +36,12 @@ add_library(cutechat_tools STATIC
     src/tool.cpp
     src/toolregistry.cpp
     src/tooldispatcher.cpp
+    src/chathelp.cpp
     # headers listed so AUTOMOC finds the Q_OBJECT classes (they live in include/, not next to the .cpp)
     include/cutechat/tool.h
     include/cutechat/toolregistry.h
-    include/cutechat/tooldispatcher.h)
+    include/cutechat/tooldispatcher.h
+    include/cutechat/chathelp.h)
 add_library(CuteChat::tools ALIAS cutechat_tools)
 target_include_directories(cutechat_tools PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -54,6 +56,7 @@ add_library(cutechat_core STATIC
     src/llmpresets.cpp
     src/llmclient.cpp
     src/llmsession.cpp
+    src/chatengine.cpp
     src/sessionkeys.cpp
     src/chatlog.cpp
     src/chatrecorder.cpp
@@ -62,6 +65,7 @@ add_library(cutechat_core STATIC
     include/cutechat/llmpresets.h
     include/cutechat/llmclient.h
     include/cutechat/llmsession.h
+    include/cutechat/chatengine.h
     include/cutechat/sessionkeys.h
     include/cutechat/chatlog.h
     include/cutechat/chatrecorder.h

@@ -15,6 +15,11 @@
 
 #include <cutechat/chatbackend.h>
 #include <cutechat/chatdock.h>
+#include <QAction>
+#include <QMenu>
+#include <QSpinBox>
+#include <QToolButton>
+#include <cutechat/chatengine.h>
 #include <cutechat/chathost.h>
 #include <cutechat/llmconfig.h>
 #include <cutechat/llmsession.h>
@@ -58,6 +63,13 @@ public:
         finished << name + (result.ok ? QStringLiteral(":ok") : QStringLiteral(":failed"));
     }
 
+    bool agentOnWorkerThread() const override { return threaded; }
+    bool showAgentControls() const override { return controls; }
+    bool controls = false;
+    QString helpText() const override { return help; }
+    QString help;
+
+    bool threaded = false;
     FileChatBackend backend;
     QStringList approvals, finished;
 };
@@ -85,12 +97,20 @@ private slots:
         QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).removeRecursively();
     }
 
+    void questionIsAnsweredStoredAndRestored_data()
+    {
+        QTest::addColumn<bool>("threaded");
+        QTest::newRow("same thread") << false;
+        QTest::newRow("worker thread") << true;
+    }
     void questionIsAnsweredStoredAndRestored()
     {
+        QFETCH(bool, threaded);
         StubServer server;
         QVERIFY(server.isListening());
         QTemporaryDir dir;
         TestHost host(dir.path());
+        host.threaded = threaded;
 
         // llm.json with the stub endpoint as the only profile
         LlmConfig config;
@@ -122,7 +142,7 @@ private slots:
         QCOMPARE(dock.contextId(), QStringLiteral("ctx-A"));
         dock.setAutonomyIndex(0); // ask: the Mutate tool needs the host's approval
         dock.askQuestion(QStringLiteral("please change it"));
-        QVERIFY(waitFor([&] { return host.backend.load(QStringLiteral("ctx-A")).size() == 1 && !dock.session()->isBusy(); }));
+        QVERIFY(waitFor([&] { return host.backend.load(QStringLiteral("ctx-A")).size() == 1 && !dock.engine()->isBusy(); }));
 
         QCOMPARE(host.approvals, QStringList { QStringLiteral("change_state") });
         QCOMPARE(host.finished, QStringList { QStringLiteral("change_state:ok") });
@@ -143,7 +163,124 @@ private slots:
         QVERIFY(host.backend.load(QStringLiteral("ctx-B")).isEmpty());
         dock.setContext(QStringLiteral("ctx-A"));
         QVERIFY(dock.grab().width() > 0);
-        QCOMPARE(dock.session()->conversation().size(), stored.first().conversation().size());
+        QCOMPARE(dock.engine()->conversation().size(), stored.first().conversation().size());
+    }
+
+    void reasoningBlockFoldsAndControlsAreRemembered()
+    {
+        StubServer server;
+        QVERIFY(server.isListening());
+        QTemporaryDir dir;
+        TestHost host(dir.path());
+        host.threaded = true;
+        host.controls = true;
+
+        LlmConfig config;
+        LlmProfile profile;
+        profile.name = QStringLiteral("stub");
+        profile.baseUrl = server.baseUrl();
+        profile.model = QStringLiteral("test-model");
+        profile.stream = true;
+        profile.maxToolIterations = 17;
+        config.setProfiles({ profile });
+        config.setActiveProfileName(QStringLiteral("stub"));
+        QString error;
+        QVERIFY2(config.save(LlmConfig::defaultPath(), &error), qPrintable(error));
+        QSettings().remove(QStringLiteral("chat/rounds"));
+        QSettings().remove(QStringLiteral("chat/reasoning"));
+
+        server.enqueue("{\"data\":[{\"id\":\"test-model\"}]}"); // GET /models
+        server.reply(200, QByteArray(), "text/event-stream");
+        server.enqueue("{\"data\":[{\"id\":\"test-model\"}]}");
+
+        ChatDock dock(&host);
+        dock.show();
+        auto* rounds = dock.findChild<QSpinBox*>();
+        QVERIFY(rounds);
+        QCOMPARE(rounds->value(), 17); // the profile's own limit until the user says otherwise
+        QVERIFY(waitFor([&] { return server.requests.size() >= 1; }));
+
+        // the user's choice is remembered for the profile and reaches the engine
+        rounds->setValue(5);
+        emit rounds->editingFinished();
+        QCOMPARE(dock.engine()->maxIterations(), 5);
+        QCOMPARE(QSettings().value(QStringLiteral("chat/rounds/stub")).toInt(), 5);
+
+        server.reply(200,
+            "data: {\"choices\":[{\"delta\":{\"reasoning\":\"17\"}}]}\n"
+            "data: {\"choices\":[{\"delta\":{\"reasoning\":\"*3\"}}]}\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":\"51\"}}]}\n"
+            "data: [DONE]\n",
+            "text/event-stream");
+        dock.askQuestion(QStringLiteral("17 times 3?"));
+        QVERIFY(waitFor([&] { return !dock.engine()->isBusy() && server.requests.size() >= 2; }));
+        QTest::qWait(150);
+
+        // one reasoning block, titled with its length and folded now that the answer is there
+        QToolButton* title = nullptr;
+        for (auto* button : dock.findChildren<QToolButton*>())
+            if (button->text().startsWith(QStringLiteral("Thinking")))
+                title = button;
+        QVERIFY2(title, "no reasoning block in the transcript");
+        QVERIFY(title->text().contains(QStringLiteral("4"))); // "17" + "*3"
+        QVERIFY(!title->isChecked());
+    }
+
+    void helpIsAToolAndOptionallyInThePrompt()
+    {
+        StubServer server;
+        QVERIFY(server.isListening());
+        QTemporaryDir dir;
+        TestHost host(dir.path());
+        host.help = QStringLiteral("<!-- provenance -->\n# Help\n\n## 1. Importing\nClick **Open Project** to import.\n\n## 2. Fitting\nPress **Fit**.\n");
+
+        LlmConfig config;
+        LlmProfile profile;
+        profile.name = QStringLiteral("stub");
+        profile.baseUrl = server.baseUrl();
+        profile.model = QStringLiteral("test-model");
+        profile.stream = false;
+        config.setProfiles({ profile });
+        config.setActiveProfileName(QStringLiteral("stub"));
+        QString error;
+        QVERIFY2(config.save(LlmConfig::defaultPath(), &error), qPrintable(error));
+        QSettings().remove(QStringLiteral("chat/help_in_prompt"));
+
+        server.enqueue("{\"data\":[{\"id\":\"test-model\"}]}");
+        server.enqueue("{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"one\"}}]}");
+        server.enqueue("{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"two\"}}]}");
+
+        ChatDock dock(&host);
+        dock.show();
+        ToolSpec spec;
+        QVERIFY2(dock.registry()->tool(QStringLiteral("get_help"), spec), "the dock registers get_help when the host has help");
+        QCOMPARE(spec.effect, ToolEffect::Read);
+        QAction* toggle = nullptr;
+        for (QAction* a : dock.actionsMenu()->actions())
+            if (a->text() == QStringLiteral("Program help in the prompt"))
+                toggle = a;
+        QVERIFY(toggle);
+        QVERIFY(!toggle->isChecked()); // the host's default
+        QVERIFY(waitFor([&] { return server.requests.size() >= 1; }));
+
+        // off: a hint to use the tool, not the text
+        dock.askQuestion(QStringLiteral("how do I import?"));
+        QVERIFY(waitFor([&] { return server.requests.size() >= 2 && !dock.engine()->isBusy(); }));
+        QString system = QJsonDocument::fromJson(server.requests.at(1)).object().value(QStringLiteral("messages")).toArray().first().toObject().value(QStringLiteral("content")).toString();
+        QVERIFY(system.contains(QStringLiteral("get_help")));
+        QVERIFY2(!system.contains(QStringLiteral("Open Project")), "tool mode must not put the text into the prompt");
+        QVERIFY(!system.contains(QStringLiteral("provenance")));
+
+        // on: the whole text, remembered
+        toggle->setChecked(true);
+        QCOMPARE(QSettings().value(QStringLiteral("chat/help_in_prompt")).toBool(), true);
+        dock.newChat();
+        dock.askQuestion(QStringLiteral("and now?"));
+        QVERIFY(waitFor([&] { return server.requests.size() >= 3 && !dock.engine()->isBusy(); }));
+        system = QJsonDocument::fromJson(server.requests.at(2)).object().value(QStringLiteral("messages")).toArray().first().toObject().value(QStringLiteral("content")).toString();
+        QVERIFY(system.contains(QStringLiteral("Click **Open Project** to import.")));
+        QVERIFY(system.contains(QStringLiteral("Press **Fit**.")));
+        QSettings().remove(QStringLiteral("chat/help_in_prompt"));
     }
 };
 

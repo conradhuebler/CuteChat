@@ -11,6 +11,7 @@
 
 #include <cutechat/chatbackend.h>
 #include <cutechat/tool.h>
+#include <cutechat/tooldispatcher.h>
 #include <cutechat/toolregistry.h>
 
 #include <QJsonObject>
@@ -31,6 +32,11 @@ struct ChatUiTexts {
     QString inProgramLabel = QStringLiteral("Run in program");
     QString fullLabel = QStringLiteral("Full");
     QString chatFileLabel = QStringLiteral("Chat");                 ///< file dialog filter: "<label> (*.json)"
+    QString autonomyTip = QStringLiteral("Which tool calls run without asking");
+    /// Shown under the selectors while the level is armed (empty: nothing shown). The dock should
+    /// never hide what the assistant is allowed to do unasked.
+    QString inProgramNote;
+    QString fullNote;
     QString approvalTitle = QStringLiteral("Assistant");
     QString noContextNotice = QStringLiteral("No context selected: this chat is not stored with anything.");
     QString thisContextHistory = QStringLiteral("This context");   ///< history menu section
@@ -59,6 +65,9 @@ public:
     /// An application that keeps its tools in a registry of its own (a singleton) returns it
     /// here; the dock then neither creates a registry nor calls registerTools().
     virtual ToolRegistry* sharedRegistry() { return nullptr; }
+    /// Likewise a dispatcher the application configured itself (log sink, interrupt handling). It
+    /// must belong to the GUI thread and work on sharedRegistry(); the dock then creates none.
+    virtual ToolDispatcher* sharedDispatcher() { return nullptr; }
 
     /// Where chats bound to a context are stored; null: the dock keeps only the history in
     /// `<AppDataLocation>/chats`.
@@ -68,6 +77,26 @@ public:
     /// Names of tool arguments that carry a context id (SupraFit: "project_id"): chats then
     /// remember which contexts a conversation touched.
     virtual QStringList contextArguments() const { return {}; }
+
+    /// Run the LLM client and the agent loop on a thread of their own (ChatEngine). An application
+    /// whose tools wait for something the GUI thread has to deliver (a calculation, a simulation)
+    /// needs this, otherwise the wait blocks the event it waits for. The tools themselves still run
+    /// where their ToolAffinity says; the approval question is always asked on the GUI thread.
+    virtual bool agentOnWorkerThread() const { return false; }
+
+    /// The how-to help of the application (Markdown, sections "## 1. Title", see chathelp.h). Empty: no
+    /// help. The dock then registers the tool get_help and lets the user choose in its menu whether the
+    /// whole text also goes into the system prompt; the default of that choice is helpInPromptByDefault().
+    virtual QString helpText() const { return QString(); }
+    virtual bool helpInPromptByDefault() const { return false; }
+
+    /// Keep the autonomy level across sessions. Off by default: restoring a loosened level on the
+    /// next start is a decision for the application (qurcuma does; it logs every change).
+    virtual bool rememberAutonomy() const { return false; }
+
+    /// Show the "Thinking" selector and the rounds limit next to the autonomy box. Both are
+    /// remembered per profile under settingsPrefix().
+    virtual bool showAgentControls() const { return false; }
 
     /// Version and commit written into the chat record (empty: not recorded).
     virtual QString appVersion() const { return QString(); }

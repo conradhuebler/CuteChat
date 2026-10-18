@@ -115,6 +115,7 @@ public:
   the dispatcher's marshalling). The dock runs them on the GUI thread (SupraFit). An application
   that wants the agent loop on a worker thread (qurcuma) keeps owning client and session and uses
   the core library only, until a `ChatEngine` wrapper exists (section 8).
+  *Done:* `ChatEngine` (`chatengine.h`) does that; `ChatHost::agentOnWorkerThread()` selects it for the dock.
 
 ## 5. Naming
 
@@ -154,7 +155,7 @@ hub, parent)` (qurcuma) -> `LlmSession(client, registry, dispatcher, parent)` pl
 
 ## 8. Risks and open points
 
-* **Worker-thread dock (qurcuma)**: the library dock is GUI-thread only. A `ChatEngine` class that
+* **Worker-thread dock (qurcuma)**: *solved by `ChatEngine`*; the text below is the original problem. A `ChatEngine` class that
   owns client+session on a thread and exposes marshalled setters is needed before qurcuma can use
   `ChatDock` itself; qurcuma adopts the core now and keeps its dock.
 * **Qt moc**: Qt 6.11 moc breaks with raw string literals containing `\"` before a Q_OBJECT class;
